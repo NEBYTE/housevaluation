@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fs::File;
 use std::io::{Read, Write};
-
+use std::time::Instant;
 use crate::core::types::Property;
 
 const MODEL_FILE: &str = "output/cervo_model.bin";
@@ -23,11 +23,9 @@ pub struct Cervo {
 impl Cervo {
     pub fn new(filename: &str) -> Result<Self, Box<dyn Error>> {
         if let Ok(model) = Self::load_model() {
-            println!("✅ Loaded existing trained model.");
             return Ok(Self { model });
         }
 
-        println!("⚠️ No saved model found. Training a new one...");
         let mut dataset = Self::load_data(filename)?;
         let model = Self::train_model(&mut dataset)?;
         Self::save_model(&model)?;
@@ -73,7 +71,10 @@ impl Cervo {
     }
 
     fn train_model(dataset: &mut Dataset<f64, f64, ndarray::Ix1>) -> Result<ElasticNet<f64>, Box<dyn Error>> {
-        let k_folds = 5;
+        let k_folds = std::env::var("K_FOLDS")
+            .expect("Missing K_FOLDS env var")
+            .parse::<usize>()
+            .unwrap_or(10);
 
         let mut best_model = None;
         let mut best_score = f64::MAX;
@@ -81,36 +82,70 @@ impl Cervo {
         let mut best_l1_ratio = None;
 
         let eval = |predicted: &Array1<f64>, expected: &ArrayView1<f64>| -> Result<Array0<f64>, linfa::Error> {
-            predicted.r2(expected).map(arr0)
+            let r2_score = predicted.r2(expected);
+            r2_score.map(arr0)
         };
 
+        let penalties = &[0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 1.0, 1.1, 1.2, 1.5, 2.0];
+        let l1_ratios = &[0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0];
 
-        for &penalty in &[0.01, 0.05, 0.1, 0.5, 1.0] {
-            for &l1_ratio in &[0.0, 0.25, 0.5, 0.75, 1.0] {
+        let total_iterations = penalties.len() * l1_ratios.len();
+        let mut completed_iterations = 0;
+
+        let start_time = Instant::now();
+
+        for &penalty in penalties {
+            for &l1_ratio in l1_ratios {
+                completed_iterations += 1;
+                let elapsed_time = start_time.elapsed().as_secs_f64();
+
+                println!("Testing model with penalty: {} and l1_ratio: {}", penalty, l1_ratio);
+
                 let model_params = ElasticNet::params()
                     .penalty(penalty)
                     .l1_ratio(l1_ratio);
 
-                let results = dataset.cross_validate(k_folds, &[model_params.clone()], &eval)?;
+                let results = match dataset.cross_validate(k_folds, &[model_params.clone()], &eval) {
+                    Ok(res) => res,
+                    Err(e) => {
+                        println!("Cross-validation error: {:?}", e);
+                        continue;
+                    }
+                };
 
-                let mean_mse = results.mean().unwrap();
+                let mean_mse = match results.mean() {
+                    Some(mse) => mse,
+                    None => {
+                        println!("Failed to compute mean MSE, skipping...");
+                        continue;
+                    }
+                };
 
                 if mean_mse < best_score {
                     best_score = mean_mse;
-                    best_model = Some(model_params.fit(dataset)?);
-                    best_penalty = Some(penalty);
-                    best_l1_ratio = Some(l1_ratio);
+                    match model_params.fit(dataset) {
+                        Ok(model) => {
+                            best_model = Some(model);
+                            best_penalty = Some(penalty);
+                            best_l1_ratio = Some(l1_ratio);
+                        }
+                        Err(e) => println!("Model fitting error: {:?}", e),
+                    }
                 }
+
+                let eta = (elapsed_time / completed_iterations as f64) * total_iterations as f64 - elapsed_time;
+                println!(
+                    "Progress: {}/{} (ETA: {:.2} seconds)",
+                    completed_iterations, total_iterations, eta
+                );
             }
         }
 
         if let Some(model) = best_model {
-            println!("Best model found with penalty {} and l1_ratio {}", best_penalty.unwrap(), best_l1_ratio.unwrap());
             Ok(model)
         } else {
             Err("No suitable model found".into())
         }
-
     }
 
     pub fn predict_price(&self, property: &Property) -> f64 {
@@ -123,8 +158,10 @@ impl Cervo {
 
     pub fn train_and_save_model(filename: &str) -> Result<(), Box<dyn Error>> {
         println!("Training a new model... This may take some time.");
+
         let mut dataset = Self::load_data(filename)?;
         let model = Self::train_model(&mut dataset)?;
+
         Self::save_model(&model)?;
         println!("Model training complete. Saved to {}", MODEL_FILE);
         Ok(())

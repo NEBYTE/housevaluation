@@ -1,15 +1,17 @@
 use crate::core::types::{SuggestionsResponse, ListingsResponse, HomeListing, Location};
 
 use std::error::Error;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use reqwest::blocking::Client;
-use std::fs::File;
-use csv::Writer;
+use std::fs::{File, OpenOptions};
+use std::path::Path;
+use csv::{ReaderBuilder, Writer};
 
 pub struct IdealistaScraper {
     client: Client,
     idealista_base_api_url: String,
     idealista_api_key: String,
+    cached_location_ids: HashSet<String>,
 }
 
 impl IdealistaScraper {
@@ -19,16 +21,35 @@ impl IdealistaScraper {
         let idealista_api_key = std::env::var("IDEALISTA_API_KEY")
             .expect("Missing IDEALISTA_API_KEY env var");
 
+        let mut cached_location_ids = HashSet::new();
+        if let Ok(file) = File::open("data/idealista_homes_spain.csv") {
+            let mut rdr = ReaderBuilder::new().has_headers(true).from_reader(file);
+            for result in rdr.records() {
+                if let Ok(record) = result {
+                    if let Some(location_id) = record.get(10) {
+                        cached_location_ids.insert(location_id.to_string());
+                    }
+                }
+            }
+        }
+
         Self {
             client: Client::new(),
             idealista_base_api_url,
             idealista_api_key,
+            cached_location_ids,
         }
     }
 
-    pub fn fetch_location_ids(&self, cities: &[&str]) -> HashMap<String, String> {
+    pub fn fetch_location_ids(&mut self, cities: &[&str]) -> HashMap<String, String> {
         let mut location_map = HashMap::new();
+
         for city_name in cities {
+            if self.cached_location_ids.contains(&city_name.to_string()) {
+                println!("Skipping city {}: Already fetched", city_name);
+                continue;
+            }
+
             let url = format!(
                 "{}/getsuggestions?prefix={}&location=es&propertyType=homes&operation=sale",
                 &self.idealista_base_api_url, city_name
@@ -46,6 +67,7 @@ impl IdealistaScraper {
                     if let Some(best_match) = data.locations.iter().max_by_key(|loc| loc.total) {
                         if let Some(location_id) = &best_match.locationId {
                             location_map.insert(city_name.to_string(), location_id.clone());
+                            self.cached_location_ids.insert(city_name.to_string());
                         }
                     }
                 }
@@ -77,7 +99,7 @@ impl IdealistaScraper {
         vec![]
     }
 
-    pub fn scrape_all_homes_spain(&self) -> Result<(), Box<dyn Error>> {
+    pub fn scrape_all_homes_spain(&mut self) -> Result<(), Box<dyn Error>> {
         let cities = [
             "Madrid", "Barcelona", "Seville", "Valencia", "Málaga", "Zaragoza", "A Coruña",
             "Gijón", "San Sebastián", "Pamplona", "Santander", "Burgos", "León", "Valladolid",
@@ -85,16 +107,36 @@ impl IdealistaScraper {
         ];
 
         let location_ids = self.fetch_location_ids(&cities);
-        let locations: Vec<Location> = cities.iter()
-            .filter_map(|&city| location_ids.get(city).map(|id| Location { locationId: id.clone(), name: city.to_string() }))
+        let locations: Vec<Location> = cities
+            .iter()
+            .filter_map(|&city| {
+                location_ids.get(city).map(|id| {
+                    Location {
+                        locationId: id.clone(),
+                        name: city.to_string(),
+                    }
+                })
+            })
             .collect();
 
-        let mut writer = Writer::from_writer(File::create("data/idealista_homes_spain.csv")?);
-        writer.write_record(&[
-            "Property Code", "Price (€)", "Size (m²)", "Floor", "Address", "Province", "Municipality", "District",
-            "Neighborhood", "Latitude", "Longitude", "Has Lift", "Price by Area", "Rooms", "Bathrooms", "Swimming Pool",
-            "Garden", "Garage", "URL",
-        ])?;
+        let csv_file_path = "data/idealista_homes_spain.csv";
+        let file_exists = Path::new(csv_file_path).exists();
+
+        let file = OpenOptions::new()
+            .write(true)
+            .append(true)
+            .create(true)
+            .open(csv_file_path)?;
+
+        let mut writer = Writer::from_writer(file);
+
+        if !file_exists {
+            writer.write_record(&[
+                "Property Code", "Price (€)", "Size (m²)", "Floor", "Address", "Province",
+                "Municipality", "District", "Neighborhood", "Latitude", "Longitude", "Has Lift",
+                "Price by Area", "Rooms", "Bathrooms", "Swimming Pool", "Garden", "Garage", "URL",
+            ])?;
+        }
 
         for location in locations {
             let listings = self.scrape_listings(&location.locationId, &location.name);

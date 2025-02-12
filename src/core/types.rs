@@ -1,3 +1,4 @@
+#[allow(snake_case)]
 use serde::Deserialize;
 
 #[derive(Debug)]

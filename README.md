@@ -37,6 +37,7 @@ This AI model processes **location-based property features** (size, floor, ameni
 - **Machine Learning Training** - Builds a model using historical property listings.
 - **Feature Extraction** - Uses **location, size, rooms, bathrooms, and more** as predictive factors.
 - **Evaluation Metrics** - Computes **R² score** to assess model performance.
+- **Prebuilt Database** - The package comes with 2500+ homes in spain with 13 data fields per house.
 
 ---
 ## In action
