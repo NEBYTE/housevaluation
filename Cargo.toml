@@ -1,0 +1,19 @@
+[package]
+name = "housevaluation"
+version = "0.1.0-pre.alpha.1"
+edition = "2024"
+
+[dependencies]
+reqwest = { version = "0.11", features = ["json", "blocking"] }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+csv = "1.2"
+ndarray = "0.15"
+
+linfa = "0.7.0"
+linfa-elasticnet = { version = "0.7.0", features = ["serde"]}
+
+dotenv = "0.15.0"
+dialoguer = "0.11.0"
